@@ -1,0 +1,120 @@
+# Playbook
+---
+- hosts: laravelvm
+  become: yes
+  user: vagrant
+  tasks:
+    - name: add yum repository
+      yum: name="{{ item }}" state=latest
+      with_items:
+        - epel-release
+        - http://rpms.famillecollet.com/enterprise/remi-release-7.rpm
+    
+    - name: yum basic install
+      yum: name="{{ item }}" state=latest
+      with_items:
+        - zip
+        - unzip
+        - git
+        - mysql
+        - nginx
+
+    - name: yum php install
+      yum: name="{{ item }}" enablerepo=remi-php71 state=latest
+      with_items:
+        - php
+        - php-devel
+        - php-mbstring
+        - php-pdo
+        - php-gd
+        - php-mysql
+        - php-xml
+        - php-fpm
+
+    - name: modify php.ini
+      replace:
+        dest: /etc/php.ini
+        regexp: "{{ item.regexp }}"
+        replace: "{{ item.replace }}"
+      with_items:
+        - { regexp: "^;date.timezone =", replace: "date.timezone = Asia/Tokyo" }
+        - { regexp: "^expose_php = On", replace: "expose_php = Off" }
+        
+    - name: modify php-fpm config file
+      replace:
+        dest: /etc/php-fpm.d/www.conf
+        regexp: "{{ item.regexp }}"
+        replace: "{{ item.replace }}"
+      with_items:
+        - { regexp: "^user = apache", replace: "user = nginx" }
+        - { regexp: "^group = apache", replace: "group = nginx" }
+        - { regexp: "^listen = 127.0.0.1:9000", replace: "listen = /var/run/php-fpm/php-fpm.sock" }
+        - { regexp: "^;listen.owner = nobody", replace: "listen.owner = nginx" }
+        - { regexp: "^;listen.group = nobody", replace: "listen.group = nginx" }        
+        
+    - name: start php-fpm
+      systemd:
+        name: php-fpm.service
+        state: restarted
+        daemon_reload: yes
+        enabled: yes
+      
+    - name: make nginx config file for laravel
+      copy:
+          dest: /etc/nginx/conf.d/laravel.conf
+          mode: 0644
+          content: |
+            server {
+              server_tokens off;
+
+              root /var/www/laravel/public;
+              
+              listen 8000;
+              server_name _;
+
+              location / {
+                index index.php index.html;
+                try_files $uri $uri/ /index.php?$query_string;
+              }
+
+              location ~ \.php$ {
+                fastcgi_pass unix:/var/run/php-fpm/php-fpm.sock;
+                fastcgi_index index.php;
+                include /etc/nginx/fastcgi_params;                  
+                fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+              }
+            }            
+
+    - name: start nginx
+      systemd:
+        name: nginx.service
+        state: restarted
+        daemon_reload: yes
+        enabled: yes
+
+    - name: install composer
+      command: "{{ item }}"
+      with_items:
+        - php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');"
+        - php composer-setup.php
+        - php -r "unlink('composer-setup.php');"
+        - mv composer.phar /usr/local/bin/composer
+
+    - name: create laravel project
+      command: /usr/local/bin/composer create-project --prefer-dist laravel/laravel /var/www/laravel
+      
+    - name: change the owner of laravel project
+      file:
+        path: /var/www/laravel
+        owner: nginx
+        group: nginx
+        recurse: yes
+
+    - name: change the permission of laravel project
+      file:
+        path: /var/www/laravel/"{{ item }}"
+        mode: 0755
+        recurse: yes
+      with_items:
+        - storage
+        - bootstrap/cache
